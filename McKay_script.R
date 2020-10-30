@@ -29,3 +29,5 @@ item_facet_plot <- train %>% ggplot() +
 
 store_facet_plot <- train %>% ggplot() + 
   geom_line(aes(x = date, y = sales, color = item)) + facet_wrap(~store)
+
+
