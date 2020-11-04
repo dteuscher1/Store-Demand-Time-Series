@@ -58,29 +58,29 @@ plot(m, forecast)
 
 prophet_plot_components(m, forecast)
 
-
+all_preds <- data.frame(id = 0, sales = 0)
 # I'm going to try things with a single store and item to begin to understand it 
-train_store_1 <- train %>% 
-    filter(store == 1, item == 1) %>%
-    mutate(ds = date,
-           y = sales) %>%
-    select(ds, y)
+for(i in 1:50){
+    train_item <- train %>% 
+        dplyr::filter(item == i) %>%
+        mutate(ds = date,
+               y = sales) %>%
+        select(ds, y)
+    
+    test_item <- test %>% 
+        dplyr::filter(item == i) %>% 
+        mutate(ds = date) %>%
+        select(ds)
+    
+    m <- prophet( n_changepoints = 0)
+    m <- add_country_holidays(m, country_name = 'US')
+    m <- fit.prophet(m, train_item)
+    forecast <- predict(m, test_item)
+    preds_frame <- data.frame(id = test$id, sales = forecast$yhat)
+    all_preds <- bind_rows(all_preds, preds_frame)
+}
 
-test_2 <- test %>% 
-    filter(store == 1, item == 1) %>% 
-    mutate(ds = date) %>%
-    select(ds)
-small_model <- prophet(train_store_1)
-forecast_small <- make_future_dataframe(small_model, periods = 90)
-forecast <- predict(small_model, forecast_small)
-plot(small_model, forecast) + add_changepoints_to_plot(m)
+all_preds_final <- all_preds[-1,]
 
-
-forecast <- predict(m, forecast_small)
-plot(m, forecast)+ add_changepoints_to_plot(m)
-m <- prophet( n_changepoints = 0)
-m <- add_country_holidays(m, country_name = 'US')
-m <- fit.prophet(m, train_store_1)
-forecast <- predict(m, forecast_small)
 plot(m, forecast) + add_changepoints_to_plot(m)
 prophet_plot_components(m, forecast)
