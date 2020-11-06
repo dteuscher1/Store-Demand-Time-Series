@@ -79,8 +79,8 @@ for(i in 1:50){
     preds_frame <- data.frame(id = test$id, sales = forecast$yhat)
     all_preds <- bind_rows(all_preds, preds_frame)
 }
-
+head(test)
 all_preds_final <- all_preds[-1,]
-
+nrow(all_preds_final)
 plot(m, forecast) + add_changepoints_to_plot(m)
 prophet_plot_components(m, forecast)
