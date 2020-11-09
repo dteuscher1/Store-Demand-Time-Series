@@ -58,29 +58,32 @@ plot(m, forecast)
 
 prophet_plot_components(m, forecast)
 
-all_preds <- data.frame(id = 0, sales = 0)
 # I'm going to try things with a single store and item to begin to understand it 
+all_preds <- data.frame(sales = 0)
 for(i in 1:50){
-    train_item <- train %>% 
-        dplyr::filter(item == i) %>%
-        mutate(ds = date,
-               y = sales) %>%
-        select(ds, y)
-    
-    test_item <- test %>% 
-        dplyr::filter(item == i) %>% 
-        mutate(ds = date) %>%
-        select(ds)
-    
-    m <- prophet( n_changepoints = 0)
-    m <- add_country_holidays(m, country_name = 'US')
-    m <- fit.prophet(m, train_item)
-    forecast <- predict(m, test_item)
-    preds_frame <- data.frame(id = test$id, sales = forecast$yhat)
-    all_preds <- bind_rows(all_preds, preds_frame)
+    for(j in 1:10){
+        train_item <- train %>% 
+            dplyr::filter(item == i, store == j) %>%
+            mutate(ds = date,
+                   y = sales) %>%
+            select(ds, y)
+        
+        test_item <- test %>% 
+            dplyr::filter(item == i, store == j) %>% 
+            mutate(ds = date) %>%
+            select(ds)
+        
+        m <- prophet( n_changepoints = 0)
+        m <- add_country_holidays(m, country_name = 'US')
+        m <- fit.prophet(m, train_item)
+        forecast <- predict(m, test_item)
+        preds_frame <- data.frame(sales = forecast$yhat)
+        all_preds <- bind_rows(all_preds, preds_frame)
+    }
 }
-head(test)
+
 all_preds_final <- all_preds[-1,]
-nrow(all_preds_final)
-plot(m, forecast) + add_changepoints_to_plot(m)
-prophet_plot_components(m, forecast)
+all_preds_final <- data.frame(id = test$id, sales = all_preds_final)
+
+write_csv(all_preds_final, "submission.csv")
+
