@@ -6,20 +6,22 @@
 library(tidyverse)
 library(caret)
 library(DataExplorer)
+library(lubridate)
 
 # Read in the data
 
 train <- read_csv("train.csv")
 test <- read_csv("test.csv")
-lubridate::month()
+
 
 
 # Combine data
-all_data <- train %>% bind_rows(test)
+all_data_2 <- train %>% bind_rows(test)
 
 # Check the data structure
 glimpse(train)
 
+overall_mean <- mean(all_data_2$sales, na.rm = TRUE)
 
 # Change items and stores to a factor
 all_data <- all_data %>%
@@ -37,6 +39,7 @@ train <- all_data %>%
     filter(!is.na(sales))
 test <- all_data %>%
     filter(is.na(sales))
+
 
 # Check for missing values
 plot_missing(train, ggtheme = theme_minimal())
@@ -101,7 +104,7 @@ for(i in 1:50){
             mutate(ds = date) %>%
             select(ds, mean_month_sales, mean_weekday_sales)
         
-        m <- prophet(holidays.prior.scale = 4, changepoint_range=0.9, interval.width = 0.95,changepoint.prior.scale = 0.006,
+        m <- prophet(holidays.prior.scale = 4, changepoint_range=0.9,interval.width = 0.95,changepoint.prior.scale = 0.006,
                      daily.seasonality = TRUE, prior.scale = 0.5, yearly.seasonality = 4)
         m <- add_regressor(m, "mean_month_sales")
         m <- add_regressor(m, "mean_weekday_sales")
