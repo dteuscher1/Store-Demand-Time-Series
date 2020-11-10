@@ -11,8 +11,8 @@ library(caret)
 train <- read_csv("train.csv")
 test <- read_csv("test.csv")
 
+ggplot(train, aes(x = sales)) + geom_histogram()
 # Combine data
-head(test)
 all_data <- train %>% bind_rows(test)
 
 # Check the data structure
@@ -28,17 +28,6 @@ ggplot(all_data %>% filter(item == 1), aes(x= as.Date(date), y = sales)) +
     geom_line() + 
     facet_wrap(~store)
 
-myControl <- trainControl(method = "repeatedcv",
-                          number = 2,
-                          repeats = 1)
-obs <- sample(1:nrow(train), nrow(train) *.01)
-small_train <- train[obs,]
-rf.model <- train(sales~.,
-                  data = small_train,
-                  trControl = myControl,
-                  method = "lm")
-preds <- predict(rf.model, test)
-frame <- data.frame(id = test$id, sales = preds)
 
 library(StanHeaders)
 library(prophet)
@@ -73,11 +62,12 @@ for(i in 1:50){
             mutate(ds = date) %>%
             select(ds)
         
-        m <- prophet( n_changepoints = 0)
+        m <- prophet(holidays.prior.scale = 4, changepoint_range=0.9)
         m <- add_country_holidays(m, country_name = 'US')
+        m <- add_seasonality(m, name='daily', period=90, fourier.order=5)
         m <- fit.prophet(m, train_item)
         forecast <- predict(m, test_item)
-        preds_frame <- data.frame(sales = forecast$yhat)
+        preds_frame <- data.frame(sales = expm1(forecast$yhat))
         all_preds <- bind_rows(all_preds, preds_frame)
     }
 }
@@ -86,4 +76,3 @@ all_preds_final <- all_preds[-1,]
 all_preds_final <- data.frame(id = test$id, sales = all_preds_final)
 
 write_csv(all_preds_final, "submission.csv")
-
