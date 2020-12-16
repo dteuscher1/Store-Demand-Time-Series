@@ -1,0 +1,332 @@
+---
+title: "Store Item Demand Forecasting"
+author: David Teuscher
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+    html_document:
+        theme: cosmo
+        toc: TRUE
+        toc-depth: 3
+---
+
+# Overview
+
+The goal of this competition is to predict 3 months of sales for 50 different items at 10 different stores. The daily sales for each item at each store is given for the previous 5 years and is used to predict the future 3 months of sales. This analysis includes visualization of the data and trends over time, as well as model fitting using Prophet. The best source used for implementing Prophet was from the [documentation](https://facebook.github.io/prophet/). The other useful resource that I pulled from in order to understand Prophet was from [this notebook](https://www.kaggle.com/arindamgot/eda-prophet-mlp-neural-network-forecasting), which provided a lot of explanation and insight into using Prophet for this competition. The results from using Prophet turned out quite good and I was content with the results that I got. 
+
+# Initial Setup 
+
+These are the packages that I used for this analysis are loaded below. On my computer I had to load `StanHeaders` so that `prophet` would also load, but I never used anything from the package in the analysis.
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+library(tidyverse)
+library(caret)
+library(DataExplorer)
+library(lubridate)
+library(StanHeaders)
+library(prophet)
+library(patchwork)
+```
+
+The data is split into two files, a training set (`train.csv`) and a test set (`test.csv`). I read both of those in and then combine the data into a single data frame in order to manipulate the data and create some additional features. 
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+train <- read_csv("train.csv")
+test <- read_csv("test.csv")
+
+# Combine data
+all_data <- train %>% bind_rows(test)
+```
+# EDA
+
+From what I have read from other sources and from looking at this data, it appears that this is a simulated dataset, but even if it is simulated, it is useful to not skip EDA and to try to understand the relationships in the data before attempting to fit a model. 
+First, the structure of the data and the variables included are important to understand. There are 5 columns when you combine train and test sets together. There is a date variable, which goes from January 1, 2013 to March 31, 2018. The training set includes sales for all of the days from 2013-2017 and then the sales should be predicted for the first 3 months of 2018. The store and item variables indicates which store and item for that observation. These are read in as a numeric, but it makes more sense to change them to a factor, which I will do later. The sales are the total number of sales for the specific item at the store for that day. The id column is only used in the test set and it is used to identify observations for the submissions. 
+```{r, echo=FALSE}
+# Check the data structure
+glimpse(all_data)
+```
+
+There were a few variables I wanted to add to the dataset to use as regressors in the prophet model that was used in the analysis. First, I changed the item and store to a factor and then I added the month, weekday, and year. After getting that, I calculated the average sales for each month and the average sales for each weekday and I will use them as regressors in the model. I also tried using some other combination of regressors for the model, calculating the mean over different time periods, but none of those helped to improve the model, so I didn't include those here. 
+```{r, warning=FALSE, echo=FALSE}
+all_data <- all_data %>%
+    mutate(item = factor(item), 
+           store = factor(store),
+           month = month(date), 
+           weekday = weekdays(date),
+           year = year(date)) %>%
+    group_by(store, item, month) %>%
+    mutate(mean_month_sales = mean(sales, na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(store, item, weekday) %>%
+    mutate(mean_weekday_sales = mean(sales,na.rm = TRUE)) %>%
+    ungroup()
+```
+
+## Missing Data
+
+Missing values are common in a lot of datasets, so it is important to check for any missing values. Since I believe this data is simulated, I would expect that there are not any missing values, but if there are, there is likely some specific distribution or model that the data would follow that could be discovered to impute missing values. 
+
+The two plots below show that there are no missing values for any of the observations in the training set or test set, so there is no need to worry about dealing with missing values for this dataset and analysis. 
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+p1 <- plot_missing(train, ggtheme = theme_minimal())
+p2 <- plot_missing(test, ggtheme = theme_minimal())
+p1 / p2 + plot_layout(guides = "collect")
+```
+After manipulating the data and extracting features that I thought might be important, I split the data back into training and test sets because most of the visualizations and exploring that I will do is concerned with the sales, which is only included in the training set. 
+
+```{r, echo=FALSE}
+train <- all_data %>%
+    filter(!is.na(sales))
+test <- all_data %>%
+    filter(is.na(sales))
+```
+
+## Distribution of Response
+
+Now that I have determined that there are no missing values for any of the variables, I am interested in the distribution of the response variable. A lot of the machine learning algorithms and statistical models produce worse predictions if there are a lot of outliers or if the distribution of the response variable is highly skewed.
+```{r, echo=FALSE}
+ggplot(train, aes(x = sales)) + 
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    labs(x = "Sales", y = "Count")
+```
+When plotting the distribution of sales below, the distribution has a strong right skew. It appears that most items have a quantity sold of less than 100 each day, but there are a few items that have sales above 100 or even 150. As a result, it might be useful to transform the response variable to get a distribution that is less skewed. Before I transform the response variable, I want to look at the distribution of sales for each item and each store because I think the best approach is to fit a time-series model for each item and each store. These plots (especially the plot for items) are a little difficult to make out, but the general trend can be determined from the plot. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(train, aes(x = sales)) + 
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    facet_wrap(~store) +
+    labs(x = "Sales", y = "Count")
+
+ggplot(train, aes(x = sales)) + 
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    facet_wrap(~item) +
+    labs(x = "Sales", y = "Count")
+```
+When looking at the graphs above, it appears that there is less skewness when looking at specific items, although there is some that still exists. When looking at stores, each store has the same pattern as the sales overall. I think it could be fine without a transformation, but I also tried it with a transformation and the performance of that model was better with the transformation. I used the `log1p` transformation. I usually use a log transformation, but there was an item that has zero sales one day, so I used the `log1p` transformation. 
+
+There is still some skewness in the distribution of sales, but it is less drastic than before the transformation. When looking at the plots for individual stores or items, the distributions looked better than without a transformation. As a result, the model will predict the `log1p` sales and then I will back transform those predictions to submit. 
+```{r, echo=FALSE}
+ggplot(train, aes(x = log1p(sales))) +
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    labs(x = "Sales", y = "Count")
+
+ggplot(train, aes(x = log1p(sales))) + 
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    facet_wrap(~store) +
+    labs(x = "Sales", y = "Count")
+
+ggplot(train, aes(x = log1p(sales))) + 
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    facet_wrap(~item) + 
+    labs(x = "Sales", y = "Count")
+```
+
+## Trends Over Time
+
+Since this is time series data, it is useful to look at different trends over time and try to understand how the sales change over time. The sales may vary from year to year, month to month, or even day to day. Predictions will improve if there is some sort of understanding about these different patterns. Commonly, this is referred to as the seasonality and this seasonality can be weekly, monthly, quarter, or even other time periods. Without an understanding of the seasonality, a model will fail to produce good predictions for time series data. 
+
+First, I will look at the general trend over time, which the plot below displays. While there are upward and downward trends over the course of a year, the average sales appears to be higher every year when comparing to the same time during the previous year. It seems there is a positive trend from year to year and then some seasonal trends within each year. 
+```{r, echo=FALSE, message=FALSE}
+avg_sales <- train %>%
+    group_by(date) %>%
+    summarize(avg_sale = mean(sales))
+
+ggplot(avg_sales, aes(x = date, y = avg_sale)) +
+    geom_line(size =1, color = "deepskyblue4") +
+    theme_minimal() +
+    labs(x = "Date", y = "Average Sales")
+```
+The average monthly sales show a similar pattern to the average sales for each date shows. The sales will steadily increase until reaching a peak in July and then declined steadily every month until December or January of the next year. There is also a small spike that occurs between October and November of each year. We aren't told which items are being sold, but there is a good chance that either the large amounts of food cooked over Thanksgiving or the large amount of deals that occur on Black Friday or the time around Black Friday probably is a reasonable explanation for this unexpected change in the trend of average sales. The yearly pattern is also evident and the average sales in a month is greater than the average sales in that month in the previous year. 
+
+```{r, echo=FALSE, message=FALSE}
+avg_month <- train %>%
+    group_by(year, month) %>%
+    summarize(avg_sale = mean(sales)) %>%
+    mutate(yr_month = fct_reorder2(factor(paste0(year, "-", month)), desc(year), desc(month)))
+ggplot(avg_month, aes(x = yr_month , y = avg_sale)) +
+    geom_point(size =4, color = "deepskyblue4", alpha = .5) +
+    geom_line(aes(group = 1), color = "deepskyblue4") + 
+    theme_minimal() +
+    labs(x = "Date", y = "Average Sales") +
+    theme(axis.text.x = element_text(angle = 90))
+```
+
+Finally when looking at the average sales overall for each year, there is a clear trend of the average sales increasing from year to year and the yearly increase in the average sales appears to be relatively linear. It appears that this yearly increase in the average sales should be accounted for in the model. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+avg_sales_year <- train %>%
+    group_by(year) %>%
+    summarize(avg_sale = mean(sales))
+ggplot(avg_sales_year, aes(x = year, y = avg_sale)) +
+    geom_point(size =4, color = "deepskyblue4", alpha = .5) +
+    geom_line(aes(group = 1), size = 1.5, color = "deepskyblue4") +
+    theme_minimal() +
+    labs(x = "Date", y = "Average Sales")
+```
+
+The sales of the weekday shows the same trend as well. The average sales for each day with 95% confidence intervals for the average sales are included on the plot below, which shows an increasing pattern throughout the week. Monday has the least amount of sales and then the average sales per day steadily increases, with sales on the weekend being higher than on weekends on average. There is probably some weekly seasonality that will need to be considered when fitting the model. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+avg_sales_weekday <- train %>%
+    group_by(weekday) %>%
+    summarise( 
+        n=n(),
+        mean=mean(sales),
+        sd=sd(sales)) %>%
+    mutate(se=sd/sqrt(n))  %>%
+    mutate(ic=se * qt((1-0.05)/2 + .5, n-1),
+           weekday = factor(weekday, levels = c("Sunday", "Monday", "Tuesday",
+                                                  "Wednesday", "Thursday", "Friday",
+                                                  "Saturday")))
+ggplot(avg_sales_weekday, aes(x = weekday, y = mean)) +
+    geom_point(size =2, color = "deepskyblue4", alpha = .5) +
+    geom_errorbar(aes(x=weekday, ymin=mean-ic, ymax=mean+ic), size = 1, color = "deepskyblue4") +
+    theme_minimal() +
+    labs(x = "Weekday", y = "Average Sales")
+
+```
+
+# Model Fitting with Prophet
+
+After visualizing the trends over the time and better understanding what patterns are in the data, I will fit a time series model using Prophet. There are a few nice features from Prophet that allows you to visualize aspects of your model, so I'm going to show some of those features with this data on a single item from a single store. After I have finishing showing some of the capabilities of Prophet, I will models for every store and every item (a total of 500 models). 
+
+I am filtering the training and test sets to included the data for only item 1 from store 10. In order to use Prophet, the expectation is that you have a data frame that has two columns. The first column is labeled `ds`, which contains the date. The documentation states that a date should be in YYYY-MM-DD format or if the date is a timestamp then it should be in the format YYYY-MM-DD HH:MM:SS. The second column should be labeled as `y`, which contained the numeric response variable, which is sales for this analysis. This format is required for fitting a Prophet model, so make sure to do this before attempting to fit any model. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+train_single <- train %>%
+    filter(item == 1, store == 10) %>%
+    mutate(ds = date,
+           y = sales) %>%
+    dplyr::select(ds, y)
+test_single <- test %>%
+    filter(item == 1, store == 10) %>%
+    mutate(ds = date) %>%
+    dplyr::select(ds)
+```
+
+Once the data is in the specific format, then a Prophet model can be fit already, without worrying about any of the arguments that control how the model is fit. After the model is fit, a data frame can be made that includes the future dates to predict for. In this scenario, we are predicting for the first three months of 2018, which is a total of 90 days. Since we have an observation for every day, we create a data frame that adds an additional 90 periods (`periods = 90`). 
+
+Predictions with the model can be obtained using the `predict` function, similar to most models in R. The arguments are the model that you fit and then either the data frame with all the dates and the future dates or a data set with only the dates in the future. The benefit of the data set with the historical data is that the fit of the model for the historical data can be visualized and compared with the predictions going into the future as well. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+m <- prophet(train_single)
+future <- make_future_dataframe(m, periods = 90)
+forecast <- predict(m, future)
+```
+
+From the results of the EDA and visualization that was done before, it was easy to tell that there are some patterns in the data and so changing some of the arguments when fitting the model will likely improve it. I won't go into depth about all of the arguments that can be used when fitting a Prophet model, but I'll explain some of the ones that were useful for me when fitting this model. 
+
+First, there is the ability to add additional regressors to the model. For my model, I included the average sales per month and the average sales per weekday. Any regressors that you wish to use in the model should be included in the data frame that has `ds` and `y`. The process for fitting the model is a little different when you want to adjust the arguments. First, you initialize the model by running `prophet()` with no data. Some arguments for the model can be included after that. After the model has been initialized, then you use `add.regressor()` to add the regressor to the model, with the arguments being the model that you initialized previously and the name of the regressor in your data frame. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+train_single_2 <- train %>%
+    filter(item == 1, store == 10) %>%
+    mutate(ds = date,
+           y = sales) %>%
+    dplyr::select(ds, y, mean_weekday_sales, mean_month_sales)
+test_single_2 <- test %>%
+    filter(item == 1, store == 10) %>%
+    mutate(ds = date) %>%
+    dplyr::select(ds, mean_weekday_sales, mean_month_sales)
+m2 <- prophet()
+m2 <- add_regressor(m2, "mean_weekday_sales")
+m2 <- add_regressor(m2, "mean_month_sales")
+```
+
+Another thing is to add holidays into the model, since trends over time generally seem to be impacted by holidays. Shopping habits seems very likely to be influenced by holidays, so I chose to include holidays. There are built-in holidays for each country that can be used and custom holidays can also be added, so if there are certain events that are not necessarily holidays, but would have an impact on the results, it can also be added as well. For this analysis, I only included built-in US holidays, but the documentation for adding custom holidays is straightforward. Also, the competition doesn't mention anywhere that the stores are in the US, but I am making that assumption and the model did improve when including US holidays. 
+
+The process for adding holidays is almost the same as adding a regressor. Using `add_country_holidays()`, you can specify the model and the country that you would like to include the holidays for. 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+m2 <- add_country_holidays(m2, country_name = "US")
+```
+
+There is a lot of things that can be done with seasonality and I won't go into depth about it, but you can use `add_seasonality()` to add other seasonalities to the model. By default, Prophet will include weekly and yearly seasonalities as long as there are more than two cycles for each of them, so the `add seasonality()` can be used to add daily, hourly, quarter, etc. seasonalities depending on what you would like to do. The period option determines how long the period is. The Fourier order option also needs to be included as well. I'll show a monthly seasonality as an example for this model. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+m2 <- add_seasonality(m2, name='montly', period=30, fourier.order = 5)
+```
+
+Finally, the model is actually fit using `fit.prophet()` and then including the model and the data set that is used to train the model. In order to get predictions, a data frame has to be made including the ds object and the mean weekly sales and the mean montly sales and then the `predict` funciton can be used.  
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+m2 <- fit.prophet(m2, train_single_2)
+future2 <- make_future_dataframe(m2, periods = 90)
+mean_month <- c(train_single_2$mean_month_sales, test_single_2$mean_month_sales)
+mean_week <- c(train_single_2$mean_weekday_sales, test_single_2$mean_weekday_sales)
+future2 <- data.frame(ds = future2$ds, mean_weekday_sales = mean_week, mean_month_sales = mean_month)
+forecast2 <- predict(m2, future2)
+```
+
+There are many other options to adjust when using a Prophet model that I didn't cover here. The documentation does a good job of explaining what each of those options do. For the final model that I run with the best results, I tried different values with the parameters until the model stopping improving, but there was no specific reason for those values. 
+
+## Visualizing Model Results
+
+Another nice thing about the prophet model is that there are some built in functions that make it easy to visualize the results of the model. First, you can plot the predictions that are made using `plot()`. This is where the advantage of using `make_future_dataframe()` comes in, because the plots will show the model fit for all of the training set data and then the predictions that were made as well. Here is a comparison of the two models that were fit above:
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+plot(m, forecast) + theme_minimal() + labs(x = "Date", y = "Sales")
+plot(m2, forecast2) + theme_minimal() + labs(x = "Date", y = "Sales")
+```
+Since there are so many data points, it is difficult to actually see much of a difference between the two models. Another useful function for Prophet is that you can also have an interactive plot that is much easier to look closer at the trends and predictions. `dyplot.prophet()` is used to fit the interactive plot and the model and the predictions are included in the call. 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dyplot.prophet(m, forecast)
+dyplot.prophet(m2, forecast2)
+```
+
+The interactive plots allow you to look at certain time periods while also observing how the predictions do compared to the actual values for the training data. 
+
+Finally, there is a function to see the forecast broken down into different seasonalities. Using `prophet_plot_components()` a graph will show the trend and the seasonalities. 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+prophet_plot_components(m, forecast)
+prophet_plot_components(m2, forecast2)
+```
+The first model shows that the trend over time is increasing, shows the same weekly seasonality that was found in the EDA and then the yearly seasonality shows how the trend changes over time as well. The second model has the same trend and weekday plots, but when including the monthly seasonality, additional regressors, and the holidays, the yearly seasonality is affected. These plots are useful for understanding how the model is doing and what patterns are being used in the model. I won't use any of this for the model that I am fitting because there are 500 of them. 
+
+## Final Model(s)
+
+The final model that I used for my submission and my predictions is shown below. I used 500 models actually, fitting a model for each store-item combination, which is why I have a double for-loop below. The additional arguments used in the model were things that I tried through trial and error, so there is no specific reason why I chose those values for the tuning parameters. From the explanations about the different aspects of a Prophet model above, the code for obtaining these predictions should be relatively straightforward. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+all_preds <- data.frame(sales = 0)
+for(i in 1:50){
+    for(j in 1:10){
+        train_item <- train %>% 
+            dplyr::filter(item == i, store == j) %>%
+            mutate(ds = date,
+                   y = log1p(sales)) %>%
+            select(ds, y, mean_month_sales, mean_weekday_sales)
+        
+        test_item <- test %>% 
+            dplyr::filter(item == i, store == j) %>% 
+            mutate(ds = date) %>%
+            select(ds, mean_month_sales, mean_weekday_sales)
+        
+        m <- prophet(holidays.prior.scale = 4, changepoint_range=0.9,interval.width = 0.95,changepoint.prior.scale = 0.006,
+                     daily.seasonality = TRUE, prior.scale = 0.5, yearly.seasonality = 4)
+        m <- add_regressor(m, "mean_month_sales")
+        m <- add_regressor(m, "mean_weekday_sales")
+        m <- add_country_holidays(m, country_name = 'US')
+        m <- add_seasonality(m, name='twomonth', period=60, fourier.order=5)
+        m <- fit.prophet(m, train_item)
+        forecast <- predict(m, test_item)
+        preds_frame <- data.frame(sales = expm1(forecast$yhat))
+        all_preds <- bind_rows(all_preds, preds_frame)
+    }
+}
+
+all_preds_final <- all_preds[-1,]
+all_preds_final <- data.frame(id = test$id, sales = all_preds_final)
+
+write_csv(all_preds_final, "submission.csv")
+
+```
+
+# Conclusion
+
+The Prophet model does quite well at predicting in comparison to a lot of other options. For this competition, it doesn't do the best, likely because this was simulated dataset and it appears that a lot of the highest scores used the averages over time periods to get their predictions, but the Prophet model is a good application that could be applied to other data that is not simulated. The process that I followed using a Prophet model could easily be replicated with different time series data. The benefit of Prophet is that there is also the flexibility to add in additional elements, such as custom holidays or custom seasonality depending on the nature of the time series data. 
+
+As a result, I'm satisfied with the performance of this model. I think there could be improvements in the model if I tried a tuning grid, rather than simply trial and error, but I didn't have the computing resources available to do that for this competition. If more information was available about the types of items used or where the different stores were located, the models could also be customized more for each individual store and item, which possibly could improve the predictions as well. 
+
+Hopefully this notebook is helpful for those who wanted to understand Prophet a little bit more and see the approach of someone else for this competition. If you have questions or feedback, feel free to leave a comment and I'll be happy to respond. 
+

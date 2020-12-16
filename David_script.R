@@ -7,34 +7,36 @@ library(tidyverse)
 library(caret)
 library(DataExplorer)
 library(lubridate)
+library(StanHeaders)
+library(prophet)
 
 # Read in the data
-
 train <- read_csv("train.csv")
 test <- read_csv("test.csv")
 
-
-
 # Combine data
-all_data_2 <- train %>% bind_rows(test)
+all_data <- train %>% bind_rows(test)
 
 # Check the data structure
 glimpse(train)
 
-overall_mean <- mean(all_data_2$sales, na.rm = TRUE)
 
 # Change items and stores to a factor
+# Calculate average sales for each month and each weekday
 all_data <- all_data %>%
     mutate(item = factor(item), 
            store = factor(store),
            month = lubridate::month(date), 
-           weekday = weekdays(date)) %>%
+           weekday = weekdays(date),
+           year = year(date)) %>%
     group_by(store, item, month) %>%
     mutate(mean_month_sales = mean(sales, na.rm = TRUE)) %>%
     ungroup() %>%
     group_by(store, item, weekday) %>%
     mutate(mean_weekday_sales = mean(sales,na.rm = TRUE)) %>%
     ungroup()
+
+# Split back into the train and test set
 train <- all_data %>%
     filter(!is.na(sales))
 test <- all_data %>%
@@ -62,14 +64,79 @@ ggplot(train, aes(x = sales)) +
 ggplot(train, aes(x = sales)) + 
     geom_histogram(fill = "deepskyblue4", bins = 20) +
     theme_minimal() +
-    facet_wrap(~item)
+    facet_wrap(~item) +
+    labs(x = "Sales", y = "Count")
+    
+# Stores are skewed right a lot. Items are less skewed right, but I think
+# it would be good for a transformation as well
+    
+ggplot(train, aes(x = log1p(sales))) +
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
     labs(x = "Sales", y = "Count")
 
-# Visualizations of stores over time
-ggplot(all_data %>% filter(item == 1), aes(x= as.Date(date), y = sales)) +
-    geom_line() + 
-    facet_wrap(~store)
+ggplot(train, aes(x = log1p(sales))) + 
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    facet_wrap(~store) +
+    labs(x = "Sales", y = "Count")
 
+ggplot(train, aes(x = log1p(sales))) + 
+    geom_histogram(fill = "deepskyblue4", bins = 20) +
+    theme_minimal() +
+    facet_wrap(~item) + 
+    labs(x = "Sales", y = "Count")
+
+# It becomes a little left skewed when doing this, but it is better than what 
+# it previously was and outliers won't has as big of an impact. Also, log1p was
+# used because there was a value that had 0 sales. 
+
+# Average total sales per day over time
+avg_sales <- train %>%
+    group_by(date) %>%
+    summarize(avg_sale = mean(sales))
+
+ggplot(avg_sales, aes(x = date, y = avg_sale)) +
+    geom_line(size =1, color = "deepskyblue4") +
+    theme_minimal() +
+    labs(x = "Date", y = "Average Sales")
+# The average total sales seems to be increasing over time
+
+# Average sales per month
+avg_month <- train %>%
+    group_by(year, month) %>%
+    summarize(avg_sale = mean(sales)) %>%
+    mutate(yr_month = fct_reorder2(factor(paste0(year, "-", month)), desc(year), desc(month)))
+ggplot(avg_month, aes(x = yr_month , y = avg_sale)) +
+    geom_point(size =4, color = "deepskyblue4", alpha = .5) +
+    geom_line(aes(group = 1), color = "deepskyblue4") + 
+    theme_minimal() +
+    labs(x = "Date", y = "Average Sales") +
+    theme(axis.text.x = element_text(angle = 90))
+
+# Average sales per year
+avg_sales_year <- train %>%
+    group_by(year) %>%
+    summarize(avg_sale = mean(sales))
+ggplot(avg_sales_year, aes(x = year, y = avg_sale)) +
+    geom_point(size =4, color = "deepskyblue4", alpha = .5) +
+    geom_line(aes(group = 1), size = 1.5, color = "deepskyblue4") +
+    theme_minimal() +
+    labs(x = "Date", y = "Average Sales")
+
+avg_sales_weekday <- train %>%
+    group_by(weekday) %>%
+    summarise( 
+        n=n(),
+        mean=mean(sales),
+        sd=sd(sales)) %>%
+    mutate(se=sd/sqrt(n))  %>%
+    mutate(ic=se * qt((1-0.05)/2 + .5, n-1))
+ggplot(avg_sales_weekday, aes(x = weekday, y = mean)) +
+    geom_point(size =2, color = "deepskyblue4", alpha = .5) +
+    geom_errorbar(aes(x=weekday, ymin=mean-ic, ymax=mean+ic), size = 1, color = "deepskyblue4") +
+    theme_minimal() +
+    labs(x = "Weekday", y = "Average Sales")
 
 library(StanHeaders)
 library(prophet)
@@ -109,7 +176,7 @@ for(i in 1:50){
         m <- add_regressor(m, "mean_month_sales")
         m <- add_regressor(m, "mean_weekday_sales")
         m <- add_country_holidays(m, country_name = 'US')
-        m <- add_seasonality(m, name='daily', period=60, fourier.order=5)
+        m <- add_seasonality(m, name='twomonth', period=60, fourier.order=5)
         m <- fit.prophet(m, train_item)
         forecast <- predict(m, test_item)
         preds_frame <- data.frame(sales = expm1(forecast$yhat))
